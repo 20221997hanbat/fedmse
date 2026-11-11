@@ -57,9 +57,17 @@ dim_features = 115   #nba-iot: 115; cic-2023: 46
 
 scen_name = 'FL-IoT' 
 
-config_file = f"Configuration/scen2-nba-iot-50clients.json"
-# config_file = "Configuration/scen2-nba-iot-10clients.json"
+# config_file = f"Configuration/scen2-nba-iot-50clients.json"
+# config_file = "../Configuration/scen2-nba-iot-10clients.json"
 # config_file = "Configuration/cic-config.json"
+
+# main.py가 있는 위치(src)의 Configuration 폴더를 바로 바라보도록 수정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+config_file = os.path.join(
+    BASE_DIR, "Configuration", "scen2-nba-iot-10clients.json"
+)
+
+network_size = 10
 
 def set_seeds(seed):
     random.seed(seed)
@@ -72,11 +80,12 @@ if __name__ == "__main__":
         random.seed(data_seed)
         np.random.seed(data_seed)
         try:
-            logging.info("Loading configuration...")
-            with open(config_file, "r") as config_file:
-                config = json.load(config_file)
+            logging.info(f"Loading configuration from: {config_file}")
+            with open(config_file, "r") as f:
+                config = json.load(f)
         except Exception as e:
-            logging.info("Failed to load configuration.")
+            logging.error(f"Failed to load configuration. Error details: {e}")
+            raise e  # 실제 에러 원인(FileNotFoundError 등)을 화면에 출력하고 즉시 중단
         
         devices_list = random.sample(config['devices_list'], network_size)
         # devices_list = config['devices_list']
