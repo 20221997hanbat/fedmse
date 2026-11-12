@@ -39,10 +39,10 @@ USE_MULTI_CENTROID = False  # 1번 기법: 다중 중심점(K-means/GMM) 사용 
 DETECTOR_TYPE = "kmeans"   # 1번 기법 옵션: "kmeans" 또는 "gmm"
 NUM_CLUSTERS = 3           # 1번 기법 옵션: 다중 중심점 클러스터 개수 (K)
 
-USE_FINE_TUNING = True    # 2번 기법: 글로벌 모델 수신 후 로컬 개인화 미세조정 사용 여부 스위치
+USE_FINE_TUNING = False    # 2번 기법: 글로벌 모델 수신 후 로컬 개인화 미세조정 사용 여부 스위치
 FT_EPOCH = 5               # 2번 기법 옵션: 미세조정 로컬 에포크 수
 
-USE_DYNAMIC_LAMBDA = False # 3번 기법: SVD 복잡도 기반 적응형 수축 계수(Dynamic Lambda) 사용 여부 스위치
+USE_DYNAMIC_LAMBDA = True # 3번 기법: SVD 복잡도 기반 적응형 수축 계수(Dynamic Lambda) 사용 여부 스위치
 RUN_AUTOENCODER = False    # 기본 Autoencoder 비교군도 함께 실행할지 여부 (False면 hybrid만 빠르게 실행)
 # =====================================================================
 
