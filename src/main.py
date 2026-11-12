@@ -32,6 +32,20 @@ import logging
 logging.basicConfig(level=logging.INFO,  # Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+# =====================================================================
+# [확장 기법 On/Off 스위치 설정 구간] - 각 브랜치 실험에 맞게 True/False를 변경하세요
+# =====================================================================
+USE_MULTI_CENTROID = True  # 1번 기법: 다중 중심점(K-means/GMM) 사용 여부 스위치
+DETECTOR_TYPE = "kmeans"   # 1번 기법 옵션: "kmeans" 또는 "gmm"
+NUM_CLUSTERS = 3           # 1번 기법 옵션: 다중 중심점 클러스터 개수 (K)
+
+USE_FINE_TUNING = False    # 2번 기법: 글로벌 모델 수신 후 로컬 개인화 미세조정 사용 여부 스위치
+FT_EPOCH = 5               # 2번 기법 옵션: 미세조정 로컬 에포크 수
+
+USE_DYNAMIC_LAMBDA = False # 3번 기법: SVD 복잡도 기반 적응형 수축 계수(Dynamic Lambda) 사용 여부 스위치
+RUN_AUTOENCODER = False    # 기본 Autoencoder 비교군도 함께 실행할지 여부 (False면 hybrid만 빠르게 실행)
+# =====================================================================
+
 
 num_participants = 0.5
 epoch = 100
@@ -42,6 +56,17 @@ network_size = 50
 data_seed = 1234
 # no_Exp = f"nonIID_Exp1_Rerun_{epoch}epoch_10client_lr0001_lamda{shrink_lambda}_ratio{num_participants*100}"
 no_Exp = f"IID-Update_Exp6_scale_{epoch}epoch_{network_size}client_{num_rounds}rounds_lr{lr_rate}_lamda{shrink_lambda}_ratio{num_participants*100}_dataseed{data_seed}"
+
+# 켜진 스위치 조합에 따라 결과 폴더명(no_Exp) 앞에 자동으로 태그 부착 (폴더 덮어쓰기 방지)
+exp_tags = []
+if USE_MULTI_CENTROID:
+    exp_tags.append(f"{DETECTOR_TYPE.upper()}{NUM_CLUSTERS}")
+if USE_FINE_TUNING:
+    exp_tags.append(f"FT{FT_EPOCH}")
+if USE_DYNAMIC_LAMBDA:
+    exp_tags.append("DynLam")
+if len(exp_tags) > 0:
+    no_Exp = f"{'_'.join(exp_tags)}_{no_Exp}"
 
 num_runs = 5
 batch_size = 12
@@ -169,6 +194,11 @@ if __name__ == "__main__":
                 pin_memory=True
             )
             
+            # 3번 기법(Dynamic Lambda)을 위한 클라이언트 로컬 데이터 SVD 복잡도 계산
+            singular_vals = np.linalg.svd(processed_train_data, full_matrices=False, compute_uv=False)
+            variance_ratio = (singular_vals ** 2) / np.sum(singular_vals ** 2)
+            complexity_score = -np.sum(variance_ratio * np.log(variance_ratio + 1e-12)) / np.log(len(variance_ratio))
+
             # indices = np.random.choice(processed_dev_data.shape[0], 200, replace=False)
             client_info.append({
                 "device": device['name'],
@@ -177,13 +207,30 @@ if __name__ == "__main__":
                 "valid_loader": valid_loader,
                 "test_loader": test_loader,
                 "test_dataset": (processed_test_data, test_label),
-                "dev_normal_dataset": dev_normal_data
+                "dev_normal_dataset": dev_normal_data,
+                "complexity_score": float(complexity_score),
+                "dynamic_lambda": float(shrink_lambda)
             })
+
+        # 3번 기법 스위치가 켜져 있을 경우 클라이언트별 적응형 shrink_lambda 할당
+        if USE_DYNAMIC_LAMBDA:
+            all_scores = np.array([client["complexity_score"] for client in client_info])
+            mean_score = np.mean(all_scores)
+            std_score = np.std(all_scores) + 1e-8
+            for client in client_info:
+                rel_z = (client["complexity_score"] - mean_score) / std_score
+                adap_val = shrink_lambda - (2.5 * rel_z)
+                client["dynamic_lambda"] = float(np.clip(adap_val, 5.0, 15.0))
+                logging.info(f"[Dynamic Lambda] {client['device']} -> Complexity: {client['complexity_score']:.4f}, Lambda: {client['dynamic_lambda']:.2f}")
+
+        active_detector = DETECTOR_TYPE if USE_MULTI_CENTROID else "cen"
+        model_type_list = ["hybrid", "autoencoder"] if RUN_AUTOENCODER else ["hybrid"]
+
         for update_type in ["avg", "fedprox", "mse_avg"]:
         # for update_type in ["fedprox"]:
         # for update_type in ["mse_avg"]:
             # for model_type in ["autoencoder"]:
-            for model_type in ["hybrid", "autoencoder"]:
+            for model_type in model_type_list:
                 for run in range(num_runs):
                     set_seeds(run*10000)
                     for client in client_info:
@@ -279,7 +326,18 @@ if __name__ == "__main__":
                                 # if round == 0:
                                 for i, client in enumerate(selected_clients):
                                     logging.info("Training local model...")
-                                    device_trainer = ClientTrainer(model=global_aggregator.model, \
+                                    if USE_DYNAMIC_LAMBDA:
+                                        local_sae_model = Shrink_Autoencoder(input_dim=dim_features,
+                                                                            output_dim=dim_features,
+                                                                            shrink_lambda=client["dynamic_lambda"],
+                                                                            latent_dim=11,
+                                                                            hidden_neus=50)
+                                        local_sae_model.load_state_dict(copy.deepcopy(global_aggregator.model.state_dict()))
+                                        train_target_model = local_sae_model
+                                    else:
+                                        train_target_model = global_aggregator.model
+
+                                    device_trainer = ClientTrainer(model=train_target_model, \
                                         save_dir=client['save_dir'], epoch=epoch, lr_rate=lr_rate, update_type=update_type)
                                     
                                     device_trainer.run(client["train_loader"], client["valid_loader"])
@@ -295,11 +353,24 @@ if __name__ == "__main__":
                                 logging.info("Training done! Evaluating...")
                                 # evaluate the model in clients
                             
-                                evaluator = Evaluator(global_aggregator.model, metric=metric, model_type=model_type)
+                                evaluator = Evaluator(global_aggregator.model, metric=metric, model_type=model_type, detector_type=active_detector, n_clusters=NUM_CLUSTERS)
                                 round_results = {}
                                 
                                 for i, client in enumerate(client_info):
                                     logging.info(f"Evaluating client {i} - name: {client['device']}")
+                                    if USE_FINE_TUNING:
+                                        personal_model = Shrink_Autoencoder(input_dim=dim_features,
+                                                                            output_dim=dim_features,
+                                                                            shrink_lambda=client["dynamic_lambda"],
+                                                                            latent_dim=11,
+                                                                            hidden_neus=50)
+                                        personal_model.load_state_dict(copy.deepcopy(global_aggregator.model.state_dict()))
+                                        ft_save_dir = os.path.join(client['save_dir'], "finetune")
+                                        personal_trainer = ClientTrainer(model=personal_model, \
+                                            save_dir=ft_save_dir, epoch=FT_EPOCH, lr_rate=lr_rate, update_type="avg")
+                                        personal_trainer.run(client["train_loader"], client["valid_loader"])
+                                        evaluator = Evaluator(personal_trainer.model, metric=metric, model_type=model_type, detector_type=active_detector, n_clusters=NUM_CLUSTERS)
+
                                     auc_score, test_latent, test_label = evaluator.evaluate(client["test_loader"], client["train_loader"])
                                     round_results[client['device']] = auc_score
                                     # store latent of SAE and SAE_MSEFed
@@ -445,4 +516,3 @@ if __name__ == "__main__":
                                     if global_worse > global_patience:
                                         logging.info("Early stopping in global round!")
                                         break
-                                    
